@@ -139,11 +139,9 @@ fn manhattan(from: &Position, to: &Position) -> u16 {
     (from.x.abs_diff(to.x) + from.y.abs_diff(to.y)) as u16
 }
 
-fn simulate(fields: &HashMap<i16, Vec<Blizzard>>, width: &i8, height: &i8) -> Vec<Position> {
+fn simulate(fields: &HashMap<i16, Vec<Blizzard>>, start_time: i16, start: &Position, goal: &Position, width: &i8, height: &i8) -> Vec<Position> {
 
-    let start = Position{x: 0, y: -1};
-    let start_state = State{rec_time: 0, pos: start};
-    let goal = Position{x: width -1, y: height - 1};
+    let start_state = State{rec_time: start_time, pos: *start};
 
     let mut came_from: HashMap<u64, State> = HashMap::new();
     let mut open_set: HashSet<(u64, State)> = HashSet::new();
@@ -174,11 +172,11 @@ fn simulate(fields: &HashMap<i16, Vec<Blizzard>>, width: &i8, height: &i8) -> Ve
 
         //print_all(&fields[&current_state.rec_time], &current_state.pos, width, height);
 
-        if current_state.pos == goal {
+        if current_state.pos == *goal {
 
             let mut path: Vec<Position> = vec![];
             let mut trac_back_state = current_state.clone();
-            while trac_back_state.pos != start {
+            while trac_back_state.pos != *start {
                 path.push(trac_back_state.pos.clone());
                 trac_back_state = came_from[&trac_back_state.calculate_hash()].clone();
             }
@@ -229,6 +227,13 @@ fn determine_options(state: &State, fields: &HashMap<i16, Vec<Blizzard>>, width:
     if current_pos.y == -1 {
         if !next_field.iter().any(|b| b.pos == Position{x: 0, y: 0}) {
             next_states.push(state.tick(Some(Direction::Down), fields, width, height));
+        }
+        return next_states;  
+    }
+
+    if current_pos.y == *height {
+        if !next_field.iter().any(|b| b.pos == Position{x: width - 1, y: height - 1}) {
+            next_states.push(state.tick(Some(Direction::Up), fields, width, height));
         }
         return next_states;  
     }
@@ -495,8 +500,13 @@ fn main() {
         }
     }
 
-    let path = simulate(&fields, &width, &height);
+    let path_start_goal = simulate(&fields, 0, &Position{x: 0, y: -1}, &Position{x: width - 1, y: height - 1}, &width, &height);
+    let new_start = (path_start_goal.len() + 2).rem_euclid(period as usize) as i16;
+    let path_goal_start = simulate(&fields, new_start, &Position{x: width - 1, y: height}, &Position{x: 0, y: 0}, &width, &height);
+    let new_start = (new_start as usize + path_goal_start.len() + 2).rem_euclid(period as usize) as i16;
+    let path_start_goal_2 = simulate(&fields, new_start, &Position{x: 0, y: -1}, &Position{x: width - 1, y: height - 1}, &width, &height);
 
-    println!("completed search. Path: {:?}", path);
+    println!("path_start_goal {} path_goal_start {} path_start_goal_2 {}", path_start_goal.len(), path_goal_start.len(), path_start_goal_2.len());
+
 
 }
