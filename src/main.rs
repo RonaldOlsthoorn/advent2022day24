@@ -1,5 +1,5 @@
 
-use std::{io::{BufReader, BufRead}, fs::File, collections::{VecDeque, HashSet, hash_map::DefaultHasher}};
+use std::{io::{BufReader, BufRead}, fs::File, collections::{VecDeque, HashSet, hash_map::DefaultHasher, HashMap}, vec, ops::Rem};
 use std::hash::{Hash, Hasher};
 
 const BACKSPACE: char = 8u8 as char;
@@ -15,16 +15,11 @@ enum Direction {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct State {
-    field: Field,
-    path: Vec<Position>,
+    rec_time: i16,
     pos: Position
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-struct Field {
-    blizzards: Vec<Blizzard>,
-    rec_time: i16  
-}
+
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct Blizzard {
@@ -98,27 +93,6 @@ impl Blizzard {
     }
 }
 
-impl Field{
-
-    fn tick(self: &Self, width: &i8, height: &i8, period: &i16) -> Self {
-
-        Self{blizzards: tick_blizzards(&self.blizzards, width, height), rec_time: (self.rec_time + 1).rem_euclid(*period)}
-    }
-
-    fn calculate_hash(self: &Self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.hash(&mut hasher);
-        hasher.finish()
-    }
-}
-
-impl Hash for Field {
-
-    fn hash<H>(&self, state: &mut H) where H: Hasher {
-        self.rec_time.hash(state); 
-    }
-}
-
 impl State {
 
     fn calculate_hash(self: &Self) -> u64 {
@@ -126,12 +100,26 @@ impl State {
         self.hash(&mut hasher);
         hasher.finish()
     }
+
+    fn tick(self: &Self, decision: Option<Direction>, fields: &HashMap<i16, Vec<Blizzard>>, width: &i8, height: &i8) -> Self {
+
+        let next_rec_time = (self.rec_time + 1).rem_euclid(fields.len() as i16);
+        let next_pos;
+
+        if let Some(dir) = decision {
+            next_pos = self.pos.tick(&dir, width, height);
+        } else {
+            next_pos = self.pos.clone();
+        }
+
+        Self{rec_time: next_rec_time, pos: next_pos}
+    }
 }
 
 impl Hash for State {
 
     fn hash<H>(&self, state: &mut H) where H: Hasher {
-        self.field.hash(state);
+        self.rec_time.hash(state);
         self.pos.hash(state);
     }
 }
@@ -147,199 +135,213 @@ fn tick_blizzards(field: &Vec<Blizzard>, width: &i8, height: &i8) -> Vec<Blizzar
     return res;
 }
 
-fn simulate(field: &Vec<Blizzard>, goal: Position, width: &i8, height: &i8) {
-
-    let gcd = find_gcd(width, height);
-    let period: i16 = (*height as i16) * ((*width as i16) / (gcd as i16));
-
-    let mut visited_states = HashSet::new();
-
-    let mut best_path = std::usize::MAX;
-
-    let mut Q: VecDeque<(State, Option<Direction>, Vec<Blizzard>)> = VecDeque::new();
-
-    let fs = find_first_states(field, width, height, &period);
-    Q.extend(fs);
-
-    while !Q.is_empty() {
-        
-        let (previous_state, decision, projection) = Q.pop_front().unwrap();
-
-        //println!("");
-        //print_all(&previous_state.field.blizzards, &previous_state.pos, width, height);
-        //println!("decision: {:?}", decision);
-
-        let mut current_state;
-        let current_rec_time = (previous_state.field.rec_time + 1).rem_euclid(period);
-
-        if let Some(dir) = decision {
-            current_state = State{
-                field: Field{blizzards: projection, rec_time: current_rec_time},
-                pos: previous_state.pos.tick(&dir, width, height),
-                path: previous_state.path};
-            if current_state.pos == goal {
-
-                current_state.path.push(current_state.pos);
-
-                if current_state.path.len() < best_path {
-                    println!("Found better path. Len: {}", current_state.path.len() );
-                    println!("path: {:?}", current_state.path);
-
-                    best_path = current_state.path.len();
-
-                }
-                continue;
-            }
-        } else {
-            current_state = State{
-                field: Field{blizzards: projection, rec_time: current_rec_time},
-                pos: previous_state.pos,
-                path: previous_state.path};
-        }
-
-        if current_state.field.blizzards.iter().any(|b| b.pos == current_state.pos) {
-            println!("invalid field:");
-            print_field(&current_state.field.blizzards, width, height);
-            println!("pos: {:?}", &current_state.pos);
-            panic!("invalid state!!")
-        }
-
-        let hash = current_state.calculate_hash();
-
-        if visited_states.contains(&hash) {
-            continue;
-        }
-
-        visited_states.insert(hash);
-        current_state.path.push(current_state.pos);
-
-        let new_projection = tick_blizzards(&current_state.field.blizzards, width, height);
-
-        let options = determine_options(&new_projection, &current_state.pos, width, height);
-
-        for option in options {
-            Q.push_front((current_state.clone(), option.clone(), new_projection.clone()));
-        }
-    }
+fn manhattan(from: &Position, to: &Position) -> u16 {
+    (from.x.abs_diff(to.x) + from.y.abs_diff(to.y)) as u16
 }
 
-fn determine_options(field: &Vec<Blizzard>, pos: &Position, width: &i8, height: &i8) -> Vec<Option<Direction>> {
+fn simulate(fields: &HashMap<i16, Vec<Blizzard>>, width: &i8, height: &i8) -> Vec<Position> {
 
-    let mut options = Vec::new();
+    let start = Position{x: 0, y: -1};
+    let start_state = State{rec_time: 0, pos: start};
+    let goal = Position{x: width -1, y: height - 1};
 
-    if !field.iter().any(|b| &b.pos == pos) {
-        options.push(None);
-    }
+    let mut came_from: HashMap<u64, State> = HashMap::new();
+    let mut open_set: HashSet<(u64, State)> = HashSet::new();
+    open_set.insert((start_state.calculate_hash(), start_state.clone()));
 
-    let mut alt_pos = *pos;
+    let mut g_score: HashMap<u64, u16> = HashMap::new();
+    g_score.insert(start_state.calculate_hash(), 0);
 
-    if pos.x == 0 {
-        if pos.y == 0 {
-            alt_pos.x += 1;
+    let mut f_score: HashMap<u64, u16> = HashMap::new();
+    f_score.insert(start_state.calculate_hash(), manhattan(&start, &goal));
 
-            if !field.iter().any(|b| b.pos == alt_pos) {
-                options.push(Some(Direction::Right));
+    while !open_set.is_empty() {
+
+        let (current_hash, current_state) = open_set.iter().min_by(
+            |(left_h, _), (right_h, _)|
+            {
+                let mut left = std::u16::MAX;
+                if f_score.contains_key(left_h){
+                    left = f_score[left_h];                
+                }
+                let mut  right = std::u16::MAX;
+                if f_score.contains_key(right_h){
+                    right = f_score[right_h];                
+                }
+                left.cmp(&right)
+            }
+        ).unwrap().clone();
+
+        //print_all(&fields[&current_state.rec_time], &current_state.pos, width, height);
+
+        if current_state.pos == goal {
+
+            let mut path: Vec<Position> = vec![];
+            let mut trac_back_state = current_state.clone();
+            while trac_back_state.pos != start {
+                path.push(trac_back_state.pos.clone());
+                trac_back_state = came_from[&trac_back_state.calculate_hash()].clone();
             }
 
-            alt_pos.x -= 1;
-            alt_pos.y += 1;
+            return path.into_iter().rev().collect();
+        }
 
-            if !field.iter().any(|b| b.pos == alt_pos) {
-                options.push(Some(Direction::Down));
-            }
-        } else if pos.y == height - 1 {
-            alt_pos.x += 1;
+        open_set.remove(&(current_hash.clone(), current_state.clone()));
+        
+        let neighbours = determine_options(&current_state, fields, width, height);
+        let tentativ_score = g_score[&current_hash] + 1;
 
-            if !field.iter().any(|b| b.pos == alt_pos) {
-                options.push(Some(Direction::Right));
-            }
+        for neighbour in neighbours {
 
-            alt_pos.x -= 1;
-            alt_pos.y -= 1;
-
-            if !field.iter().any(|b| b.pos == alt_pos) {
-                options.push(Some(Direction::Up));
-            }
-        } else {
-            alt_pos.y += 1;
-
-            if !field.iter().any(|b| b.pos == alt_pos) {
-                options.push(Some(Direction::Down));
+            let mut neighbour_g_score = std::u16::MAX;
+            let neighbour_hash = neighbour.calculate_hash();
+            
+            if g_score.contains_key(&neighbour_hash) {
+                neighbour_g_score = g_score[&neighbour_hash];
             }
 
-            alt_pos.y -= 1;
-            alt_pos.x += 1;
+            if tentativ_score < neighbour_g_score {
+                came_from.insert(neighbour_hash, current_state.clone());
+                g_score.insert(neighbour_hash, tentativ_score);
+                f_score.insert(neighbour_hash, tentativ_score + manhattan(&neighbour.pos, &goal));
 
-            if !field.iter().any(|b| b.pos == alt_pos) {
-                options.push(Some(Direction::Right));
-            }
-
-            alt_pos.y -= 1;
-            alt_pos.x -= 1;
-
-            if !field.iter().any(|b| b.pos == alt_pos) {
-                options.push(Some(Direction::Up));
+                open_set.insert((neighbour_hash, neighbour));
             }
         }
-    } else if pos.x == width - 1 {
-        if pos.y == 0 {
-            alt_pos.x -= 1;
+    }
 
-            if !field.iter().any(|b| b.pos == alt_pos) {
-                options.push(Some(Direction::Left));
+    return vec![];
+}
+
+fn determine_options(state: &State, fields: &HashMap<i16, Vec<Blizzard>>, width: &i8, height: &i8) -> Vec<State> {
+
+    let next_rec_time = (state.rec_time + 1).rem_euclid(fields.len() as i16);
+    let mut next_states = Vec::new();
+
+    let next_field = &fields[&next_rec_time];
+
+    let current_pos = state.pos;
+
+    if !next_field.iter().any(|b| b.pos == current_pos) {
+        next_states.push(state.tick(None, fields, width, height));
+    }
+
+    if current_pos.y == -1 {
+        if !next_field.iter().any(|b| b.pos == Position{x: 0, y: 0}) {
+            next_states.push(state.tick(Some(Direction::Down), fields, width, height));
+        }
+        return next_states;  
+    }
+
+    let mut alt_pos = current_pos;
+
+    if current_pos.x == 0 {
+        if current_pos.y == 0 {
+            alt_pos.x += 1;
+
+            if !next_field.iter().any(|b| b.pos == alt_pos) {
+                next_states.push(state.tick(Some(Direction::Right), fields, width, height));
             }
 
-            alt_pos.x += 1;
+            alt_pos.x -= 1;
             alt_pos.y += 1;
 
-            if !field.iter().any(|b| b.pos == alt_pos) {
-                options.push(Some(Direction::Down));
+            if !next_field.iter().any(|b| b.pos == alt_pos) {
+                next_states.push(state.tick(Some(Direction::Down), fields, width, height));
             }
-        } else if pos.y == height - 1 {
-            alt_pos.x -= 1;
-
-            if !field.iter().any(|b| b.pos == alt_pos) {
-                options.push(Some(Direction::Left));
-            }
-
+        } else if current_pos.y == height - 1 {
             alt_pos.x += 1;
+
+            if !next_field.iter().any(|b| b.pos == alt_pos) {
+                next_states.push(state.tick(Some(Direction::Right), fields, width, height));
+            }
+
+            alt_pos.x -= 1;
             alt_pos.y -= 1;
 
-            if !field.iter().any(|b| b.pos == alt_pos) {
-                options.push(Some(Direction::Up));
+            if !next_field.iter().any(|b| b.pos == alt_pos) {
+                next_states.push(state.tick(Some(Direction::Up), fields, width, height));
             }
         } else {
             alt_pos.y += 1;
 
-            if !field.iter().any(|b| b.pos == alt_pos) {
-                options.push(Some(Direction::Down));
-            }
-
-            alt_pos.y -= 1;
-            alt_pos.x -= 1;
-
-            if !field.iter().any(|b| b.pos == alt_pos) {
-                options.push(Some(Direction::Left));
+            if !next_field.iter().any(|b| b.pos == alt_pos) {
+                next_states.push(state.tick(Some(Direction::Down), fields, width, height));
             }
 
             alt_pos.y -= 1;
             alt_pos.x += 1;
 
-            if !field.iter().any(|b| b.pos == alt_pos) {
-                options.push(Some(Direction::Up));
+            if !next_field.iter().any(|b| b.pos == alt_pos) {
+                next_states.push(state.tick(Some(Direction::Right), fields, width, height));
+            }
+
+            alt_pos.y -= 1;
+            alt_pos.x -= 1;
+
+            if !next_field.iter().any(|b| b.pos == alt_pos) {
+                next_states.push(state.tick(Some(Direction::Up), fields, width, height));
+            }
+        }
+    } else if current_pos.x == width - 1 {
+        if current_pos.y == 0 {
+            alt_pos.x -= 1;
+
+            if !next_field.iter().any(|b| b.pos == alt_pos) {
+                next_states.push(state.tick(Some(Direction::Left), fields, width, height));
+            }
+
+            alt_pos.x += 1;
+            alt_pos.y += 1;
+
+            if !next_field.iter().any(|b| b.pos == alt_pos) {
+                next_states.push(state.tick(Some(Direction::Down), fields, width, height));
+            }
+        } else if current_pos.y == height - 1 {
+            alt_pos.x -= 1;
+
+            if !next_field.iter().any(|b| b.pos == alt_pos) {
+                next_states.push(state.tick(Some(Direction::Left), fields, width, height));
+            }
+
+            alt_pos.x += 1;
+            alt_pos.y -= 1;
+
+            if !next_field.iter().any(|b| b.pos == alt_pos) {
+                next_states.push(state.tick(Some(Direction::Up), fields, width, height));
+            }
+        } else {
+            alt_pos.y += 1;
+
+            if !next_field.iter().any(|b| b.pos == alt_pos) {
+                next_states.push(state.tick(Some(Direction::Down), fields, width, height));
+            }
+
+            alt_pos.y -= 1;
+            alt_pos.x -= 1;
+
+            if !next_field.iter().any(|b| b.pos == alt_pos) {
+                next_states.push(state.tick(Some(Direction::Left), fields, width, height));
+            }
+
+            alt_pos.y -= 1;
+            alt_pos.x += 1;
+
+            if !next_field.iter().any(|b| b.pos == alt_pos) {
+                next_states.push(state.tick(Some(Direction::Up), fields, width, height));
             }
         }
     } else {
         alt_pos.x += 1;
 
-        if !field.iter().any(|b| b.pos == alt_pos) {
-            options.push(Some(Direction::Right));
+        if !next_field.iter().any(|b| b.pos == alt_pos) {
+            next_states.push(state.tick(Some(Direction::Right), fields, width, height));
         }
 
         alt_pos.x -= 2;
 
-        if !field.iter().any(|b| b.pos == alt_pos) {
-            options.push(Some(Direction::Left));
+        if !next_field.iter().any(|b| b.pos == alt_pos) {
+            next_states.push(state.tick(Some(Direction::Left), fields, width, height));
         }
 
         alt_pos.x += 1;
@@ -348,8 +350,8 @@ fn determine_options(field: &Vec<Blizzard>, pos: &Position, width: &i8, height: 
 
             alt_pos.y -= 1;
 
-            if !field.iter().any(|b| b.pos == alt_pos) {
-                options.push(Some(Direction::Up));
+            if !next_field.iter().any(|b| b.pos == alt_pos) {
+                next_states.push(state.tick(Some(Direction::Up), fields, width, height));
             }
 
             alt_pos.y += 1;
@@ -359,48 +361,15 @@ fn determine_options(field: &Vec<Blizzard>, pos: &Position, width: &i8, height: 
 
             alt_pos.y += 1;
 
-            if !field.iter().any(|b| b.pos == alt_pos) {
-                options.push(Some(Direction::Down));
+            if !next_field.iter().any(|b| b.pos == alt_pos) {
+                next_states.push(state.tick(Some(Direction::Down), fields, width, height));
             }
         }
     }
 
-    // for mid_blizzard in field.iter().filter(|b| b.pos == *pos){
-    //     match mid_blizzard.dir {
-    //         Direction::Up => {options.retain(|&o| if let Some(d) = o {d != Direction::Down} else {true})},
-    //         Direction::Down => {options.retain(|&o| if let Some(d) = o {d != Direction::Up} else {true})},
-    //         Direction::Left => {options.retain(|&o| if let Some(d) = o {d != Direction::Right} else {true})},
-    //         Direction::Right => {options.retain(|&o| if let Some(d) = o {d != Direction::Left} else {true})}
-    //     }    
-    // }
-
-    options
+    next_states
 }
 
-fn find_first_states(field: &Vec<Blizzard>, width: &i8, height: &i8, period: &i16) -> Vec<(State, Option<Direction>, Vec<Blizzard>)> {
-
-    let start = Position{x: 0, y: -1};
-    let mut first_states = Vec::new();
-    let mut cache = Vec::new();
-    let mut state = State{field: Field{blizzards: field.clone(), rec_time: 0}, path: vec![start], pos: start};
-
-    while !cache.contains(&state.field) {
-        
-        cache.push(state.field.clone());
-
-        let projection = tick_blizzards(&state.field.blizzards, width, height);
-
-        if !projection.iter().any(|b| b.pos == Position::Origin) {
-            first_states.push((state.clone(), Some(Direction::Down), projection.clone()));
-        }
-
-        state.field.blizzards = projection;
-        state.field.rec_time = (state.field.rec_time + 1).rem_euclid(*period);
-        state.path.push(start);
-    }
-
-    first_states
-}
 
 fn print_all(field: &Vec<Blizzard>, pos: &Position, width: &i8, height: &i8){
 
@@ -491,25 +460,43 @@ fn find_gcd(a: &i8, b: &i8) -> i8 {
 }
 
 fn main() {
+   
+    let mut init_field = Vec::new();
 
-    let lines: Vec<String> = BufReader::new(File::open("input.txt").unwrap()).lines().map(|l| l.unwrap()).collect();
+    let width;
+    let height;
 
-    let mut field = Vec::new();
+    {
+        let lines: Vec<String> = BufReader::new(File::open("input.txt").unwrap()).lines().map(|l| l.unwrap()).collect();
 
-    for (row_index, line) in lines[1..lines.len() - 1].iter().enumerate() {
+        for (row_index, line) in lines[1..lines.len() - 1].iter().enumerate() {
+    
+            init_field.extend(line[1..line.len() -1].chars().enumerate().filter_map(|(col_index, c)|
+            if c == '^' {Some(Blizzard{pos: Position {x: col_index as i8, y: row_index as i8}, dir: Direction::Up})}
+            else if c == 'v' {Some(Blizzard{pos: Position {x: col_index as i8, y: row_index as i8}, dir: Direction::Down})}
+            else if c == '<' {Some(Blizzard{pos: Position {x: col_index as i8, y: row_index as i8}, dir: Direction::Left})}
+            else if c == '>' {Some(Blizzard{pos: Position {x: col_index as i8, y: row_index as i8}, dir: Direction::Right})}
+            else {None}));
+        }
 
-        field.extend(line[1..line.len() -1].chars().enumerate().filter_map(|(col_index, c)|
-        if c == '^' {Some(Blizzard{pos: Position {x: col_index as i8, y: row_index as i8}, dir: Direction::Up})}
-        else if c == 'v' {Some(Blizzard{pos: Position {x: col_index as i8, y: row_index as i8}, dir: Direction::Down})}
-        else if c == '<' {Some(Blizzard{pos: Position {x: col_index as i8, y: row_index as i8}, dir: Direction::Left})}
-        else if c == '>' {Some(Blizzard{pos: Position {x: col_index as i8, y: row_index as i8}, dir: Direction::Right})}
-        else {None}));
+        width = lines[0].len() as i8 - 2;
+        height = lines.len() as i8 - 2;
     }
 
-    let width = lines[0].len() as i8 - 2;
-    let height = lines.len() as i8 - 2;
+    let period: i16 = (height as i16) * ((width as i16) / (find_gcd(&width, &height) as i16));
+    let mut fields: HashMap<i16, Vec<Blizzard>> = HashMap::new();
+    
+    {
+        let mut f = init_field.clone();
 
-    simulate(&field, Position{x: width - 1, y: height - 1}, &width, &height);
+        for i in 0..period {
+            fields.insert(i, f.clone());
+            f = tick_blizzards(&f, &width, &height);
+        }
+    }
 
-    println!("completed search");
+    let path = simulate(&fields, &width, &height);
+
+    println!("completed search. Path: {:?}", path);
+
 }
